@@ -216,7 +216,7 @@ class ArttechScriptor:
     Основной класс ассистента Arttech Scriptor для работы с корпоративными книгами.
     """
     
-    def __init__(self, base_path: str = "/home/ubuntu/corpbooks"):
+    def __init__(self, base_path: str = "/home/temo/HyperCyfra/projects/arttech-scriptor/corpbooks"):
         """
         Инициализация ассистента.
         
