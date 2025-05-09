@@ -28,6 +28,15 @@ import wave
 from typing import Dict, List, Optional, Tuple, Any, Union, Set
 from pathlib import Path
 from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+import openai
+
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+OPENAI_AVAILABLE = bool(OPENAI_API_KEY)
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,34 +46,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("arttech_scriptor")
 
-# Попытка импорта OpenAI для интеграции с GPT
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-    # Проверка наличия API ключа
-    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-    
-    # Для демонстрационных целей можно использовать фиктивный ключ
-    # В реальном использовании этот блок нужно удалить и использовать настоящий ключ API
-    if not OPENAI_API_KEY:
-        DEMO_MODE = True
-        OPENAI_API_KEY = "sk-demo-key-for-testing-purposes-only"
-        logger.warning("Используется демонстрационный режим. Ответы GPT будут эмулироваться.")
-    else:
-        DEMO_MODE = False
-    
-    openai.api_key = OPENAI_API_KEY
-except ImportError:
-    OPENAI_AVAILABLE = False
-    DEMO_MODE = False
-    logger.warning("Библиотека OpenAI не установлена. Функция /ask будет работать в ограниченном режиме.")
-
-# Глобальная переменная для хранения экземпляра модели Whisper
-_WHISPER_MODEL = None
-
-# Класс для обработки ошибок неизвестных команд
 class UnknownCommandError(Exception):
-    """Исключение, возникающее при обработке неизвестной команды."""
+    """Исключение для неизвестных команд."""
     pass
 
 def get_whisper_model():
@@ -200,12 +183,11 @@ def process_voice_command(audio_path=None, mic_duration=None):
             result = assistant.process_command(text)
             return f"Распознанная команда: {text}\n\n{result}"
         except UnknownCommandError:
-            # Если команда не распознана, используем GPT для уточнения
-            if OPENAI_AVAILABLE and OPENAI_API_KEY:
-                clarification = assistant.clarify_command(text)
-                return f"Распознанная команда: {text}\n\n{clarification}"
-            else:
-                return f"Распознанная команда: {text}\n\nНе удалось распознать команду. Доступные команды: /list, /info, /get, /ask, /deadlines, /my"
+            clarification = assistant.clarify_command(text)
+            return f"Распознанная команда: {text}\n\n{clarification}"
+        except Exception as e:
+            logger.error(f"Ошибка при обработке голосовой команды: {e}")
+            return f"Произошла ошибка при обработке голосовой команды: {str(e)}"
     except Exception as e:
         logger.error(f"Ошибка при обработке голосовой команды: {e}")
         return f"Произошла ошибка при обработке голосовой команды: {str(e)}"
@@ -527,18 +509,18 @@ class ArttechScriptor:
         Raises:
             Exception: Если произошла ошибка при получении embedding
         """
-        if not OPENAI_AVAILABLE or not OPENAI_API_KEY:
+        if not OPENAI_API_KEY:
             raise ValueError("OpenAI API недоступен или отсутствует API ключ")
         
         try:
-            # Используем модель text-embedding-ada-002 для получения embedding
-            response = openai.Embedding.create(
+            # Используем новое API для получения embedding
+            response = openai.embeddings.create(
                 model="text-embedding-ada-002",
                 input=text
             )
             
             # Извлекаем embedding из ответа
-            embedding = response["data"][0]["embedding"]
+            embedding = response.data[0].embedding
             return embedding
         except Exception as e:
             logger.error(f"Ошибка при получении embedding: {e}")
@@ -716,11 +698,7 @@ class ArttechScriptor:
         """
         try:
             # Находим наиболее релевантные чанки для запроса
-            if DEMO_MODE:
-                # В демонстрационном режиме используем простой поиск для получения контекста
-                relevant_chunks = self._get_demo_relevant_chunks(query, company_code)
-            else:
-                relevant_chunks = self._find_relevant_chunks(query, company_code, top_k=8)
+            relevant_chunks = self._find_relevant_chunks(query, company_code, top_k=8)
             
             if not relevant_chunks:
                 if company_code:
@@ -751,23 +729,19 @@ class ArttechScriptor:
             Вопрос: {query}
             """
             
-            if DEMO_MODE:
-                # В демонстрационном режиме эмулируем ответ GPT
-                answer = self._generate_demo_answer(query, context, company_code)
-            else:
-                # Отправляем запрос к GPT
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo-16k",  # Используем модель с большим контекстным окном
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=1500,
-                    temperature=0.7
-                )
-                
-                # Извлекаем ответ
-                answer = response.choices[0].message.content
+            # Отправляем запрос к GPT
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo-16k",  # Используем модель с большим контекстным окном
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=1500,
+                temperature=0.7
+            )
+            
+            # Извлекаем ответ
+            answer = response.choices[0].message.content
             
             # Добавляем информацию об источниках
             sources_info = "\n\nИсточники:\n" + "\n".join([f"- {src}" for src in sources])
@@ -777,152 +751,6 @@ class ArttechScriptor:
         except Exception as e:
             logger.error(f"Ошибка при запросе к GPT: {e}")
             return f"Произошла ошибка при обработке запроса через GPT: {e}. Попробуйте использовать простой поиск."
-    
-    def _get_demo_relevant_chunks(self, query: str, company_code: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Получение релевантных чанков для демонстрационного режима.
-        
-        Args:
-            query: Текст запроса
-            company_code: Код компании или None для поиска по всем компаниям
-            
-        Returns:
-            Список словарей с информацией о релевантных чанках
-        """
-        relevant_chunks = []
-        query_terms = query.lower().split()
-        
-        # Получаем список компаний для поиска
-        if company_code:
-            companies = [{"code": company_code}]
-        else:
-            companies = self.get_companies()
-        
-        for company in companies:
-            company_code = company["code"]
-            company_dir = self.base_path / company_code
-            
-            # Поиск в summary.md
-            summary_path = company_dir / "summary.md"
-            if summary_path.exists():
-                try:
-                    with open(summary_path, 'r', encoding='utf-8') as f:
-                        summary_content = f.read()
-                    
-                    # Проверяем, содержит ли summary.md хотя бы один термин запроса
-                    if any(term in summary_content.lower() for term in query_terms):
-                        relevant_chunks.append({
-                            "company_code": company_code,
-                            "file_path": str(summary_path),
-                            "content": summary_content,
-                            "similarity": 0.9  # Фиктивное значение сходства
-                        })
-                except Exception as e:
-                    logger.error(f"Ошибка при чтении summary.md для {company_code}: {e}")
-            
-            # Поиск в других текстовых файлах
-            for subdir in ["01_raw", "02_processed"]:
-                subdir_path = company_dir / subdir
-                if subdir_path.exists():
-                    text_files = list(subdir_path.glob("**/*.txt")) + list(subdir_path.glob("**/*.md"))
-                    for file_path in text_files:
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                file_content = f.read()
-                            
-                            # Проверяем, содержит ли файл хотя бы один термин запроса
-                            if any(term in file_content.lower() for term in query_terms):
-                                relevant_chunks.append({
-                                    "company_code": company_code,
-                                    "file_path": str(file_path),
-                                    "content": file_content,
-                                    "similarity": 0.8  # Фиктивное значение сходства
-                                })
-                        except Exception as e:
-                            logger.error(f"Ошибка при чтении файла {file_path}: {e}")
-        
-        # Сортируем чанки по фиктивному значению сходства
-        relevant_chunks.sort(key=lambda x: x["similarity"], reverse=True)
-        
-        # Возвращаем до 5 наиболее релевантных чанков
-        return relevant_chunks[:5]
-    
-    def _generate_demo_answer(self, query: str, context: str, company_code: Optional[str] = None) -> str:
-        """
-        Генерация демонстрационного ответа на запрос.
-        
-        Args:
-            query: Текст запроса
-            context: Контекст из релевантных чанков
-            company_code: Код компании или None для поиска по всем компаниям
-            
-        Returns:
-            Сгенерированный ответ
-        """
-        # Простая эвристика для генерации ответа на основе запроса и контекста
-        query_lower = query.lower()
-        
-        # Базовый ответ
-        answer = f"На основе предоставленной информации "
-        
-        # Добавляем специфичные для запроса фрагменты
-        if "инновации" in query_lower or "технологии" in query_lower:
-            if company_code == "NIIPH":
-                answer += "НИИФ активно внедряет инновационные технологии в области химической промышленности. "
-                answer += "Среди ключевых инноваций можно выделить разработку новых катализаторов, "
-                answer += "автоматизацию производственных процессов и внедрение экологически чистых технологий. "
-                answer += "Институт также сотрудничает с ведущими научными центрами для обмена опытом и технологиями."
-            elif company_code == "ASIZ":
-                answer += "АСИЗ специализируется на инновациях в области средств индивидуальной защиты. "
-                answer += "Компания разрабатывает новые материалы с улучшенными защитными свойствами, "
-                answer += "внедряет современные методы тестирования продукции и использует цифровые технологии для оптимизации производства."
-            else:
-                answer += "в представленных компаниях активно внедряются различные инновационные технологии. "
-                answer += "НИИФ фокусируется на химической промышленности, разрабатывая новые катализаторы и экологичные процессы. "
-                answer += "АСИЗ концентрируется на инновациях в области средств защиты, создавая новые материалы и методы тестирования."
-        elif "история" in query_lower or "развитие" in query_lower:
-            if company_code == "NIIPH":
-                answer += "НИИФ имеет богатую историю, начиная с 1960-х годов. "
-                answer += "Институт был основан для разработки новых химических технологий и материалов. "
-                answer += "За годы своего существования НИИФ стал ведущим научно-исследовательским центром в своей области, "
-                answer += "получил множество патентов и наград за инновационные разработки."
-            elif company_code == "ASIZ":
-                answer += "АСИЗ был основан в период активного развития промышленной безопасности. "
-                answer += "Компания прошла путь от небольшого производства до крупного предприятия, "
-                answer += "специализирующегося на разработке и производстве средств индивидуальной защиты. "
-                answer += "Ключевыми этапами развития стали внедрение международных стандартов качества и расширение ассортимента продукции."
-            else:
-                answer += "представленные компании имеют интересную историю развития. "
-                answer += "НИИФ был основан в 1960-х годах как научно-исследовательский институт в области химии. "
-                answer += "АСИЗ развивался как предприятие по производству средств защиты, постепенно расширяя ассортимент и внедряя новые технологии."
-        elif "продукция" in query_lower or "продукты" in query_lower:
-            if company_code == "NIIPH":
-                answer += "НИИФ разрабатывает и производит широкий спектр химической продукции. "
-                answer += "В ассортимент входят катализаторы для различных химических процессов, "
-                answer += "специальные химические соединения для промышленного применения, "
-                answer += "а также материалы с улучшенными свойствами для различных отраслей промышленности."
-            elif company_code == "ASIZ":
-                answer += "АСИЗ специализируется на производстве средств индивидуальной защиты. "
-                answer += "Компания выпускает защитные костюмы, респираторы, перчатки, очки и другие средства защиты, "
-                answer += "соответствующие международным стандартам качества и безопасности. "
-                answer += "Продукция АСИЗ используется в различных отраслях промышленности, строительстве и медицине."
-            else:
-                answer += "компании предлагают различную продукцию в своих областях. "
-                answer += "НИИФ производит химические соединения и катализаторы для промышленности. "
-                answer += "АСИЗ выпускает средства индивидуальной защиты, включая защитные костюмы, респираторы и другое оборудование."
-        else:
-            # Общий ответ для других типов запросов
-            if company_code:
-                answer += f"компания {company_code} активно развивается в своей области. "
-                answer += "Для получения более конкретной информации рекомендуется уточнить запрос, "
-                answer += "например, об инновациях, истории развития или продукции компании."
-            else:
-                answer += "представленные компании (НИИФ и АСИЗ) работают в разных отраслях промышленности. "
-                answer += "НИИФ специализируется на химических технологиях и исследованиях, "
-                answer += "а АСИЗ занимается разработкой и производством средств индивидуальной защиты. "
-                answer += "Для получения более конкретной информации рекомендуется уточнить запрос."
-        
-        return answer
     
     def _simple_search(self, query: str, company_code: Optional[str] = None) -> str:
         """
@@ -1110,9 +938,6 @@ class ArttechScriptor:
         Returns:
             Уточняющий ответ
         """
-        if not OPENAI_AVAILABLE or not OPENAI_API_KEY:
-            return f"Не удалось распознать команду: '{text}'. Доступные команды: /list, /info, /get, /ask, /deadlines, /my"
-        
         try:
             # Формируем запрос к GPT
             system_prompt = """
@@ -1136,36 +961,19 @@ class ArttechScriptor:
             Какую команду он, вероятно, хотел использовать? Предложите правильный вариант.
             """
             
-            if DEMO_MODE:
-                # В демонстрационном режиме эмулируем ответ GPT
-                if "список" in text.lower() or "компании" in text.lower():
-                    answer = "Вы, вероятно, хотели получить список компаний. Используйте команду /list"
-                elif "информация" in text.lower() or "мета" in text.lower():
-                    answer = "Вы, вероятно, хотели получить информацию о компании. Используйте команду /info <код_компании>"
-                elif "файл" in text.lower() or "получить" in text.lower():
-                    answer = "Вы, вероятно, хотели получить файл. Используйте команду /get <код_компании> <путь_к_файлу>"
-                elif "вопрос" in text.lower() or "спросить" in text.lower():
-                    answer = "Вы, вероятно, хотели задать вопрос. Используйте команду /ask <вопрос> или /ask <код_компании> <вопрос>"
-                elif "дедлайн" in text.lower() or "срок" in text.lower():
-                    answer = "Вы, вероятно, хотели узнать о дедлайнах. Используйте команду /deadlines"
-                elif "профиль" in text.lower() or "пользователь" in text.lower():
-                    answer = "Вы, вероятно, хотели посмотреть свой профиль. Используйте команду /my"
-                else:
-                    answer = f"Не удалось определить, какую команду вы хотели использовать. Доступные команды: /list, /info, /get, /ask, /deadlines, /my"
-            else:
-                # Отправляем запрос к GPT
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=150,
-                    temperature=0.7
-                )
-                
-                # Извлекаем ответ
-                answer = response.choices[0].message.content
+            # Отправляем запрос к GPT
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=150,
+                temperature=0.7
+            )
+            
+            # Извлекаем ответ
+            answer = response.choices[0].message.content
             
             return f"Не удалось распознать команду: '{text}'.\n\n{answer}"
             
